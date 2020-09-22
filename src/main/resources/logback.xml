@@ -1,0 +1,22 @@
+<configuration>
+   	<appender name="STDOUT" class="ch.qos.logback.core.ConsoleAppender">
+		<encoder>
+			<Pattern>[%d{HH:mm:ss:SSS}][%5p][%c:%L] %m%n</Pattern>
+		</encoder>
+	</appender>
+
+    <appender name="logfile" class="ch.qos.logback.core.rolling.RollingFileAppender">
+		<rollingPolicy class="ch.qos.logback.core.rolling.TimeBasedRollingPolicy">
+			<FileNamePattern>/Users/dearzhang/Desktop/logs/spring-cloud-distributed-lock-%d{yyyy-MM-dd}.log</FileNamePattern>
+		</rollingPolicy>
+		<layout class="ch.qos.logback.classic.PatternLayout">
+			<pattern>[%d{HH:mm:ss:SSS}][%5p][%c:%L] %m%n</pattern>
+		</layout>
+	</appender>
+	
+
+    <root level="info">
+        <appender-ref ref="logfile"/>
+        <appender-ref ref="STDOUT"/>
+    </root>
+</configuration>
