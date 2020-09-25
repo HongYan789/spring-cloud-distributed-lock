@@ -36,21 +36,399 @@ CREATE TABLE `methodLock` (
 
 
 
+新增实体类
+
+```
+@Data
+public class MethodLock {
+
+    private Integer id;
+
+    private String methodName;
+
+    private String desc;
+
+    private Date updateTime;
+}
+```
+
+
+
+
+
+新增对应mapper类,主要实现插入（加锁）、删除（解锁）方法
+
+```
+public interface MethodLockMapper {
+    @Insert({"insert into method_lock set method_name=#{methodName} ,`desc`=#{desc}"})
+    int save(MethodLock methodLock);
+
+    @Delete({"delete from method_lock where method_name=#{methodName}"})
+    int delete(String methodName);
+}
+```
+
+
+
+
+
+新增并发调用controller
+
+```
+/**
+     * method 1：
+     * 基于数据库锁方式实现分布式锁
+     * @return
+     */
+    @GetMapping("/lock1")
+    public Boolean getLock1(){
+        Boolean flag = true;
+        String methodName = "lockMethod";
+        //模拟加锁
+        try {
+            log.info(">>>>执行database加锁操作>>>>，threadName:[{}]",Thread.currentThread().getName());
+            lock(methodName,"lock method by database");
+        } catch (Exception e) {
+            flag = false;
+            log.error(">>>>执行database加锁操作失败>>>>，threadName:[{}]，error:[{}]",Thread.currentThread().getName(),e.getMessage());
+        }
+        if(flag){
+            try {
+                //模拟业务操作
+                log.info(">>>>休眠15s模拟业务处理耗时>>>>，threadName:[{}]",Thread.currentThread().getName());
+                Thread.sleep(15000);
+                //模拟解锁
+                unLock(methodName);
+                log.info(">>>>解锁成功>>>>，threadName:[{}]",Thread.currentThread().getName());
+            } catch (Exception e) {
+                log.error(">>>>执行database加锁操作失败>>>>，threadName:[{}]，error:[{}]",Thread.currentThread().getName(),e.getMessage());
+            }
+        }
+        return flag;
+    }
+    /**
+     * 模拟加锁
+     */
+    private void lock(String methodName,String desc) {
+        MethodLock lock = new MethodLock();
+        lock.setMethodName(methodName);
+        lock.setDesc(desc);
+        methodLockMapper.save(lock);
+    }
+    /**
+     * 模拟解锁
+     * @param methodName
+     */
+    private void unLock(String methodName) {
+        methodLockMapper.delete(methodName);
+    }
+```
+
+
+
 ​	
 
 ##### 基于数据库乐观锁
 
 基于时间戳（timestamp）记录机制实现
 
+实现原理：给数据库表增加一个时间戳字段类型的字段，当读取数据时，将timestamp字段的值一同读出，数据每更新一次，timestamp也同步更新。当对数据做提交更新操作时，检查当前数据库中数据的时间戳和自己更新前取到的时间戳进行对比，若相等，则更新，否则认为是失效数据。
+
+实现步骤：
+
+1. 新增数据表
+
+```
+--用于实现数据库乐观锁
+drop table if exists `user_lock`;
+CREATE TABLE `user_lock` (
+  `user_id` bigint(19) NOT NULL  AUTO_INCREMENT COMMENT '主键',
+  `user_name` varchar(45) DEFAULT NULL,
+  `version` int(11) NOT NULL  COMMENT '版本号',
+  `timestamp` timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '时间搓',
+  PRIMARY KEY (`user_id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8;
+
+INSERT INTO `lock`.`user_lock`(`user_id`, `user_name`, `version`, `timestamp`) VALUES (150, 'zhangsan', 1, '2020-09-25 07:05:11');
+```
+
+
+
+2. 增加实体类bean
+
+```
+@Data
+public class UserLock {
+
+    private Long userId;
+
+    private String userName;
+
+    private Integer version;
+
+    private Date timestamp;
+}
+```
+
+
+
+
+
+3. 增加相应mapper类并实现3个方法调用，分别是通过主键id查询当前数据对象(其中包含version版本号/timestamp时间搓字段)、通过主键id+version实现对象更新、通过主键id+timestamp实现对象更新方法
+
+```
+public interface UserLockMapper {
+
+    /**
+     * databse查询增加乐观锁
+     * @param userId
+     * @return
+     */
+    @Select({" select user_id as userId,user_name as userName,`version`,`timestamp` from user_lock where user_id =#{userId}"})
+    UserLock query(Integer userId);
+
+    /**
+     * 根据主键id+版本号实现乐观锁，其中版本号为上一步select查询出来的version，如果与数据库中相等则会修改成功，否则修改失败
+     * @param userLock
+     * @return
+     */
+    @Update({" update user_lock set user_name=#{userName},`version`=`version`+1 where user_id=#{userId} and `version`=#{version} "})
+    Integer updateOptimisticLockByVersion(UserLock userLock);
+
+    /**
+     * 根据主键id+时间搓实现乐观锁，其中时间搓为上一步select查询出来的time，如果与数据库中相等则会修改成功，否则修改失败
+     * @param userLock
+     * @return
+     */
+    @Update({" update user_lock set user_name=#{userName} where user_id=#{userId} and `timestamp`=#{timestamp} "})
+    Integer updateOptimisticLockByTimeStamp(UserLock userLock);
+}
+```
+
+
+
+
+
+4. 新增并发调用controller
+
+```
+/**
+     * method 3：
+     * 基于数据库乐观锁实现分布式锁
+     * @return
+     */
+    @GetMapping("/lock3")
+    public Boolean getLock3(Integer userId){
+        //获取欲更新的数据
+        UserLock userLock = userLockMapper.query(userId);
+        log.info("查询出修改前database数据:UserLock:[{}]",userLock);
+        //模拟业务操作
+        try {
+            log.info(">>>>休眠15s模拟业务处理耗时，threadName:[{}]>>>>",Thread.currentThread().getName());
+            Thread.sleep(15000);
+        } catch (InterruptedException e) {
+            log.error("业务处理异常",e);
+        }
+        //采用version版本号方式实现分布式锁
+				//return lockByOptimisticVersion(userLock);
+        //采用timeStamp时间搓方式实现分布式锁
+        return lockByOptimistictimeStamp(userLock);
+    }
+
+    private Random random = new Random();
+    
+
+    /**
+     * 采用时间搓timeStamp实现的乐观锁
+     * @param userLock
+     */
+    public Boolean lockByOptimistictimeStamp(UserLock userLock){
+        UserLock lock = new UserLock();
+        lock.setUserId(userLock.getUserId());
+        lock.setUserName("modifyedByTimeStamp"+random.nextInt(10)+100);
+        lock.setVersion(userLock.getVersion());
+        lock.setTimestamp(userLock.getTimestamp());
+        Integer count = userLockMapper.updateOptimisticLockByTimeStamp(lock);
+        Boolean flag = count > 0 ? true :false;
+        log.info("查询出修改后database数据:UserLock:[{}],修改操作执行:[{}]",lock,flag);
+        return flag;
+    }
+```
+
+
+
+
+
 
 
 基于版本号（version）的方式实现
+
+方法同上，只需将并发调用controller稍微调整即可
+
+```
+/**
+     * method 3：
+     * 基于数据库乐观锁实现分布式锁
+     * @return
+     */
+    @GetMapping("/lock3")
+    public Boolean getLock3(Integer userId){
+        //获取欲更新的数据
+        UserLock userLock = userLockMapper.query(userId);
+        log.info("查询出修改前database数据:UserLock:[{}]",userLock);
+        //模拟业务操作
+        try {
+            log.info(">>>>休眠15s模拟业务处理耗时，threadName:[{}]>>>>",Thread.currentThread().getName());
+            Thread.sleep(15000);
+        } catch (InterruptedException e) {
+            log.error("业务处理异常",e);
+        }
+        //采用version版本号方式实现分布式锁
+        return lockByOptimisticVersion(userLock);
+        //采用timeStamp时间搓方式实现分布式锁
+        //return lockByOptimistictimeStamp(userLock);
+    }
+
+    private Random random = new Random();
+    /**
+     * 采用版本号version实现的乐观锁
+     * @param userLock
+     */
+    public Boolean lockByOptimisticVersion(UserLock userLock){
+        UserLock lock = new UserLock();
+        lock.setUserId(userLock.getUserId());
+        lock.setUserName("modifyedByVersion"+random.nextInt(10));
+        lock.setVersion(userLock.getVersion());
+        Integer count = userLockMapper.updateOptimisticLockByVersion(lock);
+        Boolean flag = count > 0 ? true :false;
+        log.info("查询出修改后database数据:UserLock:[{}],修改操作执行:[{}]",lock,flag);
+        return flag;
+    }
+
+    
+```
+
+
+
+
 
 
 
 ##### 基于数据库排他锁(即悲观锁)
 
 select * from table  <font color=red>for update</font>;
+
+
+
+具体实现步骤：
+
+1. 新增数据表
+
+```
+--用于实现数据库排他锁
+drop table if exists `user_info`;
+CREATE TABLE `user_info` (
+  `user_id` bigint(19) NOT NULL  AUTO_INCREMENT COMMENT '主键',
+  `user_name` varchar(45) DEFAULT NULL,
+  `account` varchar(45) NOT NULL,
+  `password` varchar(45) DEFAULT NULL,
+  PRIMARY KEY (`user_id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8;
+
+INSERT INTO `user_info`(`user_id`, `user_name`, `account`, `password`) VALUES (150, 'name1', 'Account1', 'pass1');
+INSERT INTO `user_info`(`user_id`, `user_name`, `account`, `password`) VALUES (152, 'name3', 'Account3', 'pass3');
+INSERT INTO `user_info`(`user_id`, `user_name`, `account`, `password`) VALUES (154, 'name5', 'Account5', 'pass5');
+INSERT INTO `user_info`(`user_id`, `user_name`, `account`, `password`) VALUES (156, 'name7', 'Account7', 'pass7');
+INSERT INTO `user_info`(`user_id`, `user_name`, `account`, `password`) VALUES (158, 'name9', 'Account9', 'pass9');
+```
+
+
+
+
+
+2. 新增对应mapper类，并实现排他锁的sql查询操作
+
+```
+public interface UserInfoMapper {
+
+    @Select({" select user_id as userId,user_name as userName,account,password from user_info order by user_id  "})
+    List<UserInfo> queryAll();
+
+    /**
+     * databse查询增加排他锁
+     * @param userId
+     * @return
+     */
+    @Select({" select user_id as userId,user_name as userName,account,password from user_info where user_id =#{userId} for update"})
+    UserInfo queryByExclusiveLock(Integer userId);
+}
+
+```
+
+
+
+3. 新增并发调用controller(其中需调整为手动模式操作数据)
+
+```
+/**
+     * method 2：
+     * 基于数据库排他锁（悲观锁）实现分布式锁
+     * @return
+     */
+    @GetMapping("/lock2")
+    public R getLock2(Integer userId){
+        try(Connection conn = dataSource.getConnection();){
+            //设置手动提交连接
+            //执行数据库排他锁加锁操作
+            UserInfo userInfo = lockByExclusive(userId,conn);
+            //模拟业务操作
+            log.info(">>>>休眠15s模拟业务处理耗时，threadName:[{}]>>>>",Thread.currentThread().getName());
+            Thread.sleep(15000);
+
+            //执行数据库排他锁解锁操作
+            unLockByExclusive(conn);
+            return new R(OpCode.sucess.getCode(),OpCode.sucess.getValue(),userInfo);
+        }catch (Exception e){
+            log.error("数据库执行异常",e);
+            return new R(OpCode.sucess.getCode(),OpCode.sucess.getValue(),new UserInfo());
+        }
+
+    }
+
+    /**
+     * 排他锁方式加锁
+     */
+    private UserInfo lockByExclusive(Integer userId,Connection conn){
+        try {
+            //设置成手动模式提交（mysql默认都是自动提交）
+            conn.setAutoCommit(false);
+            log.info("执行database数据库加锁操作，threadName:[{}]",Thread.currentThread().getName());
+            return userInfoMapper.queryByExclusiveLock(userId);
+        } catch (Exception e) {
+            log.error("执行database数据库加锁操作，threadName:[{}]，error:[{}]",Thread.currentThread().getName(),e.getMessage());
+            return new UserInfo();
+        }
+    }
+
+    /**
+     * 排他锁方式解锁
+     */
+    private void unLockByExclusive(Connection conn){
+        try {
+            log.info("执行database数据库解锁操作，threadName:[{}]",Thread.currentThread().getName());
+            //释放锁
+            conn.commit();
+        } catch (SQLException e) {
+            try {
+                conn.rollback();
+                log.error("database数据库解锁失败，threadName:[{}]，error:[{}]",Thread.currentThread().getName(),e.getMessage());
+            } catch (SQLException ex) {
+                log.error("database数据库解锁异常，threadName:[{}]，error:[{}]",Thread.currentThread().getName(),ex.getMessage());
+            }
+        }
+    }
+
+```
 
 
 
