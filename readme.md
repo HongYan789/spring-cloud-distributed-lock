@@ -1095,10 +1095,243 @@ public class CuratorController {
 6. 观察分布式锁调用操作及效果
 
 
+###扩展一
+
+#### 基于Redisson的分布式锁(优化redis分布式锁)
+
+1. 引入所需jar包
+
+```
+<dependency>
+    <groupId>org.redisson</groupId>
+    <artifactId>redisson</artifactId>
+    <version>3.15.0</version>
+</dependency>
+```
 
 
 
+2. 新增配置文件属性(本人采用的Confingure实现类，其实也可采用属性文件properties来实现，看个人喜好)
 
+   新增RedissonConfiguration.java文件,读取redis-cluster的配置即可，貌似不支持redis哨兵模式，未验证
+
+```
+@Configuration
+public class RedissonConfiguration {
+
+    @Value("${spring.redis.cluster.nodes}")
+    private String redisHost;
+
+    @Bean
+    public RedissonClient redisson() {
+        Config config = new Config();
+        String[] nodeAddr = Stream.of(redisHost.split(","))
+                .map(url -> String.format("redis://%s", url)).toArray(String[]::new);
+        config.useClusterServers()
+                .addNodeAddress(nodeAddr);
+
+        return Redisson.create(config);
+    }
+}
+```
+
+3. 编写具体的调用类controller
+主要是使用的：
+
+
+
+```
+@RestController
+@RequestMapping("/redisson")
+@Slf4j
+public class RedissonController {
+
+    @Resource
+    private Redisson redisson;
+
+    @GetMapping("/lock1")
+    public Boolean getLock1() throws InterruptedException{
+        ExecutorService pool = Executors.newFixedThreadPool(10);
+        Runnable task = () -> {
+            RLock lock = redisson.getLock("1");
+            try {
+                if (!lock.tryLock(5L, 10L, TimeUnit.SECONDS)) {
+                    throw new RuntimeException("获取锁失败");
+                }
+                IntStream.range(1, 10).forEach(i -> System.out.println(Thread.currentThread().getName() + " " + i));
+            } catch (Exception e) {
+                throw new RuntimeException("获取锁失败" + e.getMessage());
+            } finally {
+                lock.unlock();
+            }
+        };
+        pool.submit(task);
+        pool.submit(task);
+        TimeUnit.SECONDS.sleep(10);
+        return true;
+    }
+}
+```
+
+4. 观察分布式锁调用操作及效果
+
+
+
+###扩展二
+
+#### 增加分布式全链路追踪traceid
+
+ ###### 2种实现MDC全链路调用跟踪实现方式：（就是一个请求，尽管经过多次逻辑操作，但是其traceId是唯一且相同的，只有不同请求的traceId才会不同）
+ ###### InterceptorConfig配合TraceInterceptor实现MDC打印traceId来个全链路调用跟踪
+ ###### 或者使用
+ ###### LoggerServletConfig配合LoggerServletFilter实现MDC打印traceId来个全链路调用跟踪
+ ###### 但是这2种MDC打印traceId的全链路调用跟踪是有一定缺陷的，例如：
+ ###### 1、子线程中打印日志丢失traceId
+ ###### 2、HTTP调用丢失traceId
+
+1. 采用过滤器+logback配置
+实现LoggerServletFilter接口继承Filter
+```
+@Slf4j
+public class LoggerServletFilter implements Filter {
+
+    @Override
+    public void doFilter(ServletRequest servletRequest, ServletResponse servletResponse, FilterChain filterChain) throws IOException, ServletException {
+        //
+        String traceid = UUID.randomUUID().toString().replace("-", "").toUpperCase();
+        if (servletRequest instanceof HttpServletRequest) {
+            String header = ((HttpServletRequest) servletRequest).getHeader(Constants.LOG_TRACE_ID);
+            if (!StringUtils.isEmpty(header)) {
+                traceid = header;
+            }
+        }
+        MDC.put(Constants.LOG_TRACE_ID, traceid);
+        try {
+            filterChain.doFilter(servletRequest, servletResponse);
+        } catch (Exception e) {
+            log.error("过滤异常！", e);
+            throw e;
+        } finally {
+            MDC.remove(Constants.LOG_TRACE_ID);
+        }
+    }
+
+    @Override
+    public void init(FilterConfig filterConfig) throws ServletException {
+
+
+    }
+
+    @Override
+    public void destroy() {
+
+    }
+}
+```
+
+
+LoggerServletConfig
+```$xslt
+@Configuration
+public class LoggerServletConfig {
+    @Bean
+    @ConditionalOnMissingBean(
+            name = {"loggerServletFilter"}
+    )
+    public LoggerServletFilter loggerServletFilter() {
+        return new LoggerServletFilter();
+    }
+}
+```
+
+
+
+2.采用拦截器+logback配置
+
+InterceptorConfig
+
+```$xslt
+@Configuration
+public class InterceptorConfig extends WebMvcConfigurerAdapter {
+
+    @Bean
+    public HandlerInterceptor getMyInterceptor() {
+        return new TraceInterceptor();
+    }
+
+    @Override
+    public void addInterceptors(InterceptorRegistry registry) {
+        InterceptorRegistration interceptor = registry.addInterceptor(getMyInterceptor());
+        // 拦截所有、排除
+        interceptor.addPathPatterns("/**")
+                .excludePathPatterns("/aa/bb");
+    }
+}
+
+```
+
+TraceInterceptor
+
+```$xslt
+@Component
+public class TraceInterceptor implements HandlerInterceptor {
+
+    @Override
+    public boolean preHandle(HttpServletRequest request, HttpServletResponse response, Object handler) throws Exception {
+        String traceid = UUID.randomUUID().toString().replace("-", "").toUpperCase();
+        //如果有上层调用就用上层的ID
+        String traceId = request.getHeader(Constants.LOG_TRACE_ID);
+        if (traceId == null) {
+            traceId = traceid;
+        }
+
+        MDC.put(Constants.LOG_TRACE_ID, traceId);
+        return true;
+    }
+
+    @Override
+    public void postHandle(HttpServletRequest request, HttpServletResponse response, Object handler, ModelAndView modelAndView)
+            throws Exception {
+    }
+
+    @Override
+    public void afterCompletion(HttpServletRequest request, HttpServletResponse response, Object handler, Exception ex)
+            throws Exception {
+        //调用结束后删除
+        MDC.remove(Constants.LOG_TRACE_ID);
+    }
+}
+
+```
+
+
+logback增加参数
+```$xslt
+<configuration>
+   	<appender name="STDOUT" class="ch.qos.logback.core.ConsoleAppender">
+		<encoder>
+			<pattern>[%d{HH:mm:ss:SSS}][%5p][%c:%L] [traceid:%X{traceid}] %m%n</pattern>
+		</encoder>
+	</appender>
+
+    <appender name="logfile" class="ch.qos.logback.core.rolling.RollingFileAppender">
+		<rollingPolicy class="ch.qos.logback.core.rolling.TimeBasedRollingPolicy">
+			<FileNamePattern>/Users/dearzhang/Desktop/logs/spring-cloud-distributed-lock-%d{yyyy-MM-dd}.log</FileNamePattern>
+		</rollingPolicy>
+		<layout class="ch.qos.logback.classic.PatternLayout">
+			<pattern>[%d{yyyy-MM-dd HH:mm:ss.SSS}][%thread][%5p][%c{10}:%L] [traceid:%X{traceid}] %msg%n</pattern>
+		</layout>
+	</appender>
+	
+
+    <root level="info">
+        <appender-ref ref="logfile"/>
+        <appender-ref ref="STDOUT"/>
+    </root>
+</configuration>
+```
+
+3. 观察MDC分布式全链路追踪traceid调用操作及效果
 
 
 

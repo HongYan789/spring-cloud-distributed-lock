@@ -1,7 +1,7 @@
 <configuration>
    	<appender name="STDOUT" class="ch.qos.logback.core.ConsoleAppender">
 		<encoder>
-			<Pattern>[%d{HH:mm:ss:SSS}][%5p][%c:%L] %m%n</Pattern>
+			<pattern>[%d{HH:mm:ss:SSS}][%5p][%c:%L] [traceid:%X{traceid}] %m%n</pattern>
 		</encoder>
 	</appender>
 
@@ -10,7 +10,7 @@
 			<FileNamePattern>/Users/dearzhang/Desktop/logs/spring-cloud-distributed-lock-%d{yyyy-MM-dd}.log</FileNamePattern>
 		</rollingPolicy>
 		<layout class="ch.qos.logback.classic.PatternLayout">
-			<pattern>[%d{HH:mm:ss:SSS}][%5p][%c:%L] %m%n</pattern>
+			<pattern>[%d{yyyy-MM-dd HH:mm:ss.SSS}][%thread][%5p][%c{10}:%L] [traceid:%X{traceid}] %msg%n</pattern>
 		</layout>
 	</appender>
 	

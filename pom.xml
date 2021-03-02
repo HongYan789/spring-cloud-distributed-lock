@@ -72,13 +72,13 @@
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-data-redis</artifactId>
         </dependency>
-        <!--redisson扩展redis功能,实现自定义分布式锁
+        <!--redisson扩展redis功能,实现自定义分布式锁-->
         <dependency>
             <groupId>org.redisson</groupId>
             <artifactId>redisson</artifactId>
-            <version>3.8.2</version>
+            <version>3.15.0</version>
         </dependency>
-        -->
+
 
         <!-- zookeeper -->
         <dependency>
